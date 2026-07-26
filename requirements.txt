@@ -9,5 +9,8 @@ ultralytics>=8.2.0
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 pandas>=2.0.0
-torch==2.6.0+cpu
-torchvision==0.21.0+cpu
+# Jangan di-pin. Index CPU hanya menyediakan torch 2.9+ untuk Python 3.13 yang
+# dipakai Streamlit Cloud, dan wheel-nya bertanda "+cpu" — menurut PEP 440 local
+# version itu menang atas wheel CUDA dari PyPI, jadi build CPU tetap yang terpilih.
+torch
+torchvision
