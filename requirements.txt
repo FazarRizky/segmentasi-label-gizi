@@ -1,0 +1,13 @@
+# Deploy: app_yolov8.py (Streamlit Community Cloud)
+# Deps app.py (PaddleOCR/TrOCR) dipindah ke requirements-ocr.txt.
+# Index CPU wajib: wheel torch default dari PyPI membawa CUDA (~2.5 GB) dan
+# melewati batas resource Streamlit Cloud.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+streamlit>=1.49.0
+ultralytics>=8.2.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pandas>=2.0.0
+torch==2.6.0+cpu
+torchvision==0.21.0+cpu

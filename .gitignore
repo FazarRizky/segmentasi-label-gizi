@@ -1,0 +1,18 @@
+# Artefak besar (2.75 GB) — tetap di disk lokal, tidak ikut ke GitHub
+dataset_split/
+trocr_model/
+model_inference/
+last.pt
+runs/
+
+# Pipeline DBNet + TrOCR, tidak dipakai app_yolov8.py
+app.py
+requirements-ocr.txt
+open_cv_dnn.py
+test_dbnet.py
+test_real.jpg
+__pycache__/
+*.pyc
+
+# Konfigurasi lokal editor/agent
+.claude/
