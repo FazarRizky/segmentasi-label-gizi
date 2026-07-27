@@ -17,6 +17,15 @@ CONF_THRESHOLD = 0.25   # sama seperti model.val(conf=0.25, ...) & model.predict
 IOU_THRESHOLD = 0.5     # sama seperti model.val(iou=0.5, ...)
 MASK_ALPHA = 0.4        # transparansi overlay mask, murni visual (tidak ada di notebook)
 
+# ─── Konstanta praproses (disalin persis dari notebook preprocessing) ─────────
+# Dataset training sudah melewati fungsi-fungsi di bawah, jadi aplikasi WAJIB
+# menerapkannya juga. Kalau tidak, distribusi input berbeda dari saat training.
+GLARE_THRESHOLD   = 220
+CLAHE_CLIP        = 2.0
+CLAHE_TILE        = (8, 8)
+GAMMA_VALUE       = 0.6
+LOW_BRIGHT_THRESH = 100
+
 # Satu aksen hangat di ruang gelap — ramp ember, bukan pelangi default YOLO. (BGR)
 PALETTE = [(46, 157, 255), (24, 122, 255), (138, 210, 255), (77, 178, 255)]
 INK = (10, 6, 5)  # teks label di atas chip ember
@@ -97,6 +106,18 @@ with st.sidebar:
         f'</div>',
         unsafe_allow_html=True,
     )
+
+    st.markdown('<div class="hair"></div><div class="sect">Parameter praproses</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="spec">'
+        f'CLAHE clip &nbsp;<b>{CLAHE_CLIP}</b><br>'
+        f'CLAHE tile &nbsp;<b>{CLAHE_TILE[0]}×{CLAHE_TILE[1]}</b><br>'
+        f'Ambang silau &nbsp;<b>{GLARE_THRESHOLD}</b><br>'
+        f'Gamma &nbsp;<b>{GAMMA_VALUE}</b><br>'
+        f'Ambang gelap &nbsp;<b>{LOW_BRIGHT_THRESH}</b>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         '<div class="hair"></div><div class="spec">Nilai dikunci agar identik dengan '
         'cell evaluasi notebook — hasil aplikasi konsisten dengan angka di skripsi.</div>',
@@ -108,6 +129,65 @@ with st.sidebar:
 def load_yolo_seg(model_path):
     from ultralytics import YOLO
     return YOLO(model_path)
+
+# ─── Praproses ────────────────────────────────────────────────────────────────
+# Empat fungsi berikut disalin apa adanya dari notebook preprocessing. Jangan
+# "diperbaiki" di sini — bobot best.pt dilatih pada keluaran fungsi versi ini,
+# sehingga perubahan sekecil apa pun membuat input aplikasi menyimpang dari
+# distribusi training dan angka di skripsi tidak lagi mewakili perilaku app.
+def fix_glare(img):
+    lab        = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b    = cv2.split(lab)
+    clahe      = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=CLAHE_TILE)
+    l_clahe    = clahe.apply(l)
+    glare_mask = l > GLARE_THRESHOLD
+    l_result   = np.where(glare_mask, l, l_clahe).astype(np.uint8)
+    return cv2.cvtColor(cv2.merge([l_result, a, b]), cv2.COLOR_LAB2BGR)
+
+def fix_low_light(img):
+    mean_bright = np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    if mean_bright >= LOW_BRIGHT_THRESH:
+        return img
+    lut = np.array([((i / 255.0) ** (1.0 / GAMMA_VALUE)) * 255
+                    for i in range(256)], dtype=np.uint8)
+    return cv2.LUT(img, lut)
+
+def resize_with_padding(img, size=IMG_SIZE):
+    h, w    = img.shape[:2]
+    scale   = size / max(h, w)
+    new_h   = int(h * scale)
+    new_w   = int(w * scale)
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    pad_h   = size - new_h
+    pad_w   = size - new_w
+    padded  = cv2.copyMakeBorder(resized, 0, pad_h, 0, pad_w,
+                                  cv2.BORDER_CONSTANT, value=[0, 0, 0])
+    return padded, scale
+
+def preprocess(img):
+    img = fix_glare(img)
+    img = fix_low_light(img)
+    img, scale = resize_with_padding(img)
+    return img, scale
+
+def rescale_to_original(instances, scale, shape):
+    """Kembalikan koordinat dari kanvas 640x640 hasil praproses ke piksel asli.
+
+    Padding hanya ditambahkan di sisi kanan dan bawah, jadi titik asal kedua
+    ruang berimpit — cukup dibagi skala, tanpa pergeseran origin.
+    """
+    h, w = shape[:2]
+    for inst in instances:
+        poly = (inst["polygon"] / scale).astype(np.int32)
+        if poly.size:
+            np.clip(poly[:, 0], 0, w - 1, out=poly[:, 0])
+            np.clip(poly[:, 1], 0, h - 1, out=poly[:, 1])
+        inst["polygon"] = poly
+        x1, y1, x2, y2 = (np.asarray(inst["box"], dtype=np.float64) / scale)
+        inst["box"] = [int(np.clip(x1, 0, w - 1)), int(np.clip(y1, 0, h - 1)),
+                       int(np.clip(x2, 0, w - 1)), int(np.clip(y2, 0, h - 1))]
+        inst["area_px"] = int(cv2.contourArea(poly)) if poly.shape[0] >= 3 else 0
+    return instances
 
 # ─── Segmentasi ───────────────────────────────────────────────────────────────
 def segment_image(img_bgr, model):
@@ -211,9 +291,15 @@ if sources:
             continue
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        with st.spinner(f"Segmentasi {name}…"):
-            instances = segment_image(img_bgr, model)
+        with st.spinner(f"Praproses & segmentasi {name}…"):
+            # Model melihat kanvas 640x640 hasil praproses; koordinat keluarannya
+            # dipetakan balik agar mask digambar di atas gambar resolusi asli.
+            img_pre, scale = preprocess(img_bgr)
+            instances = rescale_to_original(
+                segment_image(img_pre, model), scale, img_bgr.shape
+            )
 
+        pre_rgb = cv2.cvtColor(img_pre, cv2.COLOR_BGR2RGB)
         seg_img = draw_segmentation(img_bgr, instances, MASK_ALPHA, show_conf_label)
         seg_rgb = cv2.cvtColor(seg_img, cv2.COLOR_BGR2RGB)
 
@@ -221,12 +307,16 @@ if sources:
         all_confs.extend([inst["conf"] for inst in instances])
 
         with st.expander(f"{name}  —  {len(instances)} objek", expanded=True):
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.markdown('<div class="sect">Sumber</div>', unsafe_allow_html=True)
+                st.markdown('<div class="sect">Input</div>', unsafe_allow_html=True)
                 st.image(img_rgb, width="stretch")
                 st.caption(f"{img_bgr.shape[1]} × {img_bgr.shape[0]} px")
             with col2:
+                st.markdown('<div class="sect">Praproses</div>', unsafe_allow_html=True)
+                st.image(pre_rgb, width="stretch")
+                st.caption(f"CLAHE + gamma · {IMG_SIZE} × {IMG_SIZE} · skala {scale:.3f}")
+            with col3:
                 st.markdown('<div class="sect">Segmentasi</div>', unsafe_allow_html=True)
                 st.image(seg_rgb, width="stretch")
                 st.caption(f"conf ≥ {CONF_THRESHOLD} · IoU NMS {IOU_THRESHOLD}")
@@ -297,8 +387,9 @@ else:
         '<div class="hair"></div>'
         '<div class="sect">Alur</div>'
         '<div class="spec">'
-        'Unggah berkas <span style="color:#ff9d2e">atau</span> ambil foto '
-        '&nbsp;→&nbsp; YOLOv8-seg &nbsp;→&nbsp; mask poligon per objek &nbsp;→&nbsp; confidence'
+        'Citra kemasan produk &nbsp;→&nbsp; praproses '
+        '<span style="color:#ff9d2e">CLAHE + koreksi gamma + resize 640×640</span> '
+        '&nbsp;→&nbsp; YOLOv8m-seg &nbsp;→&nbsp; polygon mask + confidence score'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -308,9 +399,10 @@ else:
             f'<div class="hair"></div><div class="sect">Spesifikasi</div>'
             f'<div class="spec">'
             f'Model &nbsp;<b>YOLOv8m-seg (fine-tuned)</b><br>'
-            f'Task &nbsp;<b>Instance segmentation — poligon</b><br>'
-            f'Input &nbsp;<b>{IMG_SIZE} × {IMG_SIZE}</b><br>'
-            f'Output &nbsp;<b>mask + bbox + confidence</b>'
+            f'Backbone &nbsp;<b>CSPDarknet · neck PAN-FPN</b><br>'
+            f'Head &nbsp;<b>anchor-free + mask branch</b><br>'
+            f'Praproses &nbsp;<b>CLAHE + gamma + pad {IMG_SIZE}×{IMG_SIZE}</b><br>'
+            f'Output &nbsp;<b>polygon mask + confidence</b>'
             f'</div>',
             unsafe_allow_html=True,
         )
